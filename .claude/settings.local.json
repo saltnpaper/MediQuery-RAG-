@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(python3:*)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(PYTHONIOENCODING=utf-8 python3:*)"
     ]
   }
 }
