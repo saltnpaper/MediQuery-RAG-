@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"/c/Users/ry092/Desktop/MIS 285N/Final Project/MediQuery-RAG-\" && python -c \"\nimport json\nwith open\\('4_Fine_Tuning_Final.ipynb', 'r', encoding='utf-8'\\) as f:\n    nb = json.load\\(f\\)\nprint\\(f'Number of cells: {len\\(nb[\\\\\"cells\\\\\"]\\)}'\\)\nfor i, cell in enumerate\\(nb['cells']\\):\n    ct = cell['cell_type']\n    src = ''.join\\(cell['source']\\)[:120]\n    print\\(f'Cell {i} [{ct}]: {src[:120]}'\\)\n\")",
+      "Bash(cd \"/c/Users/ry092/Desktop/MIS 285N/Final Project/MediQuery-RAG-\" && python -c \"\nimport json, sys\nsys.stdout.reconfigure\\(encoding='utf-8'\\)\nwith open\\('4_Fine_Tuning_Final.ipynb', 'r', encoding='utf-8'\\) as f:\n    nb = json.load\\(f\\)\nprint\\(f'Number of cells: {len\\(nb[\\\\\"cells\\\\\"]\\)}'\\)\nfor i, cell in enumerate\\(nb['cells']\\):\n    ct = cell['cell_type']\n    src = ''.join\\(cell['source']\\)[:150].replace\\('\\\\n',' '\\)\n    print\\(f'Cell {i} [{ct}]: {src}'\\)\n\")"
+    ]
+  }
+}

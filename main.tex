@@ -197,7 +197,8 @@ Medicare is the United States federal health insurance program covering approxim
 what Medicare covers for a given patient, procedure, or geographic location requires
 consulting a complex and constantly evolving set of policy documents. These documents
 are maintained by the Centers for Medicare \& Medicaid Services (CMS) and exist in two
-primary forms: \textit{National Coverage Determinations} (NCDs), which establish
+primary forms: \texti
+t{National Coverage Determinations} (NCDs), which establish
 federal-level coverage applicable uniformly across all states, and \textit{Local Coverage
 Determinations} (LCDs), which define regional rules set by Medicare Administrative
 Contractors (MACs) for specific jurisdictions.
@@ -1072,6 +1073,237 @@ To evaluate the impact of reranking, we compared the top retrieved documents bef
 
 The results show that reranking improves retrieval precision by promoting policy chunks that more directly answer the user's question.
 
+\subsection{Fine-Tuning the Bi-Encoder}
+
+While the pre-trained BGE embedding model provides strong general-purpose retrieval, its
+representations are not optimized for the specialized vocabulary and structure of Medicare
+policy documents. To close this domain gap, we fine-tuned both the bi-encoder and the
+cross-encoder reranker on Medicare-specific training data derived from our corpus.
+
+\subsubsection{Training Data Construction}
+
+We constructed a training set from the 56,288 synthetic query-gold chunk pairs described
+in Section~\ref{sec:chunking}. Each pair links a natural-language question to its
+source chunk in \texttt{all\_chunks.json}. The positive passage for each training example
+is the \textbf{full indexed chunk text} (including the metadata header), not the short
+excerpt from the evaluation CSV. This ensures that the fine-tuned model learns
+representations consistent with the actual documents it will search at inference time.
+
+\subsubsection{Hard Negative Mining}
+
+Effective contrastive learning requires not only positive pairs but also challenging
+negative examples that the model currently confuses with true matches. For each of the
+56,288 queries, we encoded the query with the pre-trained \texttt{bge-base-en-v1.5}
+model and retrieved the top 300 candidate chunks from the pre-trained FAISS index. The
+hard negative was selected as the \textbf{highest-ranked chunk whose source document ID
+differs} from the gold chunk's source ID. This guarantees that each negative is
+semantically close to the query but originates from a different policy
+document. All 56,288 pairs received valid hard negatives.
+
+\subsubsection{Train / Validation / Test Split}
+
+The 56,288 triplets were split in two stages, both stratified by query type to maintain
+label balance:
+
+\begin{enumerate}[noitemsep, topsep=4pt]
+    \item 10\% held out as a \textbf{test set} (5,629 examples) for final evaluation.
+    \item The remaining 90\% split 95/5 into \textbf{train} (48,126) and \textbf{validation}
+          (2,533).
+\end{enumerate}
+
+\subsubsection{Loss Function and Hyperparameters}
+
+We fine-tuned \texttt{BAAI/bge-base-en-v1.5} using \textbf{MultipleNegativesRankingLoss}
+(MNRL) with a scale factor of 50.0 (equivalent to a contrastive temperature of 0.02),
+matching the temperature used in BGE's original pre-training. Each training batch
+contained 32 unique anchors; the \texttt{NO\_DUPLICATES} batch sampler ensured maximum
+in-batch negative diversity.
+
+\begin{table}[h]
+\centering
+\caption{Bi-Encoder Fine-Tuning Hyperparameters}
+\label{tab:biencoder-hp}
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Base model              & \texttt{BAAI/bge-base-en-v1.5} \\
+Epochs                  & 2 \\
+Batch size              & 32 \\
+Learning rate           & $1 \times 10^{-5}$ \\
+Warmup steps            & 300 (10\% of 3,006 total) \\
+Temperature             & 0.02 (scale = 50) \\
+Precision               & fp16 \\
+Batch sampler           & \texttt{NO\_DUPLICATES} \\
+Best-model metric       & \texttt{cosine\_ndcg@10} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Validation was performed every 500 steps using an \texttt{InformationRetrievalEvaluator}
+that searched 2,533 validation queries against the full 8,563-chunk corpus. The best
+checkpoint was selected by cosine NDCG@10.
+
+The core training setup is shown below:
+
+\begin{lstlisting}[language=Python, caption=Bi-encoder fine-tuning with MNRL loss]
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.losses import MultipleNegativesRankingLoss
+from sentence_transformers.training_args import BatchSamplers
+
+biencoder_model = SentenceTransformer('BAAI/bge-base-en-v1.5')
+train_loss = MultipleNegativesRankingLoss(biencoder_model, scale=50.0)
+
+args = SentenceTransformerTrainingArguments(
+    output_dir=FT_BIENCODER_DIR,
+    num_train_epochs=2,
+    per_device_train_batch_size=32,
+    learning_rate=1e-5,
+    warmup_steps=300,
+    fp16=True,
+    batch_sampler=BatchSamplers.NO_DUPLICATES,
+    load_best_model_at_end=True,
+    metric_for_best_model="cosine_ndcg@10",
+)
+trainer = SentenceTransformerTrainer(
+    model=biencoder_model, args=args,
+    train_dataset=biencoder_train_dataset,
+    loss=train_loss,
+    evaluator=biencoder_evaluator,
+)
+trainer.train()
+\end{lstlisting}
+
+\subsubsection{Re-Encoding and Index Rebuild}
+
+After fine-tuning, all 8,563 chunks were re-encoded with the fine-tuned bi-encoder
+(\texttt{batch\_size=64}, \texttt{normalize\_embeddings=True}). A new FAISS
+\texttt{IndexFlatIP} index was built from the fine-tuned embeddings and saved as
+\texttt{medicare\_finetuned.index} (25.1\,MB).
+
+\subsection{Fine-Tuning the Cross-Encoder Reranker}
+
+\subsubsection{Hard Negative Re-Mining}
+
+Because the fine-tuned bi-encoder produces a different retrieval ranking than the
+pre-trained model, hard negatives for reranker training were \textbf{re-mined from the
+fine-tuned FAISS index}. For each of the 48,126 training queries, we retrieved the top
+100 candidates from the fine-tuned index and selected up to 7 hard negatives per query,
+each from a distinct source document. This yields a training group size of 8 per query
+(1~positive + 7~negatives), following the FlagEmbedding training protocol. After
+filtering, the reranker training set contained 307,877 pairwise examples.
+
+\subsubsection{Loss Function and Hyperparameters}
+
+We fine-tuned \texttt{BAAI/bge-reranker-v2-m3} using \textbf{BinaryCrossEntropyLoss}
+for pairwise relevance classification. Each example consisted of a query--chunk pair
+labeled 1.0 (positive) or 0.0 (negative).
+
+\begin{table}[h]
+\centering
+\caption{Reranker Fine-Tuning Hyperparameters}
+\label{tab:reranker-hp}
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Base model              & \texttt{BAAI/bge-reranker-v2-m3} \\
+Epochs                  & 2 \\
+Batch size              & 32 \\
+Learning rate           & $1 \times 10^{-5}$ \\
+Warmup steps            & 10\% of total steps \\
+Weight decay            & 0.01 \\
+Precision               & fp16 \\
+Gradient checkpointing  & Enabled \\
+Max sequence length     & 2,048 tokens \\
+Best-model metric       & \texttt{ndcg@10} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Validation used a \texttt{CrossEncoderRerankingEvaluator} with 2,042 validation samples,
+each containing 1~positive and its corresponding hard negatives. The best checkpoint was
+selected by NDCG@10.
+
+\subsection{Retrieval Improvement After Fine-Tuning}
+
+To quantify the impact of domain-specific fine-tuning, we evaluated both the pre-trained
+and fine-tuned pipelines on the held-out test set of 5,629 queries. FAISS retrieval
+returned the top 100 candidates; the reranker selected the top 5 from the top 20 FAISS
+results.
+
+\begin{table}[h]
+\centering
+\caption{Retrieval Comparison: Pre-trained vs.\ Fine-tuned Pipeline}
+\label{tab:ft-retrievalcompare}
+\small
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Metric} & \textbf{Pre-trained} & \textbf{Fine-tuned} & \textbf{Delta} \\
+\midrule
+Recall@5 (FAISS)     & 0.6460 & 0.7850 & +0.1390 \\
+Recall@10 (FAISS)    & 0.7260 & 0.8420 & +0.1160 \\
+Recall@20 (FAISS)    & 0.8040 & 0.9010 & +0.0970 \\
+MRR (FAISS)          & 0.4992 & 0.6120 & +0.1128 \\
+NDCG@5 (FAISS)       & 0.5224 & 0.6450 & +0.1226 \\
+NDCG@10 (FAISS)      & 0.5488 & 0.6730 & +0.1242 \\
+NDCG@20 (FAISS)      & 0.5686 & 0.6910 & +0.1224 \\
+\midrule
+Recall@5 (reranked)  & 0.6720 & 0.8100 & +0.1380 \\
+MRR (reranked)       & 0.4751 & 0.6300 & +0.1549 \\
+NDCG@5 (reranked)    & 0.5244 & 0.6650 & +0.1406 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Fine-tuning produced consistent double-digit improvements across every metric. The largest
+gain was in reranked MRR (+0.1549), indicating that fine-tuning not only increases whether
+the correct chunk is retrieved but also how high it ranks among the final candidates shown
+to the generator. Reranked Recall@5 reached 0.8100, meaning the correct evidence chunk
+appears in the top-5 context for over 81\% of test queries.
+
+\subsubsection{Impact of Reranking on the Fine-Tuned Pipeline}
+
+Even after fine-tuning the bi-encoder, the cross-encoder reranker provides an additional
+lift by re-scoring candidates with full query--document attention:
+
+\begin{table}[h]
+\centering
+\caption{Fine-Tuned Pipeline: Before vs.\ After Reranking}
+\label{tab:ft-rerank-delta}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+\textbf{Metric} & \textbf{FAISS Only} & \textbf{After Reranking} & \textbf{Delta} \\
+\midrule
+Recall@5  & 0.7850 & 0.8100 & +0.0250 \\
+MRR       & 0.6120 & 0.6300 & +0.0180 \\
+NDCG@5    & 0.6450 & 0.6650 & +0.0200 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Performance by Document Type}
+
+Table~\ref{tab:ft-doctype} breaks down reranked Recall@5 by document corpus. Claims
+Processing and LCD documents benefit most, likely because their larger chunk counts
+provide more contrastive training signal.
+
+\begin{table}[h]
+\centering
+\caption{Fine-Tuned Reranked Recall@5 by Document Type}
+\label{tab:ft-doctype}
+\begin{tabular}{@{}lrc@{}}
+\toprule
+\textbf{Document Type} & \textbf{Test Queries} & \textbf{Recall@5 (reranked)} \\
+\midrule
+Claims Processing Manual  & 2,535 & 0.8251 \\
+Local Coverage Determinations & 1,944 & 0.8015 \\
+Benefit Policy Manual     & 693   & 0.7958 \\
+National Coverage Determinations & 457 & 0.7781 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 The final reranked chunks are then passed to the language model in Step 4, where they are used as evidence for generating grounded answers with citations.
 
 \newpage
@@ -1340,38 +1572,20 @@ we do not yet have a complete scored evaluation table for those quantities.
 
 \subsection{Results}
 
-Table~\ref{tab:retrievalcompare} summarizes retrieval performance for pre-trained versus
-fine-tuned retrieval components. The fine-tuned setup improves every reported metric,
-both before and after reranking. The gains are largest for reranked MRR and reranked
-NDCG@5, suggesting that fine-tuning improves not only whether the correct chunk is
-retrieved, but also how high it is ranked among the final candidates shown to the
-generator.
+The full retrieval comparison between the pre-trained and fine-tuned pipelines is
+presented in Table~\ref{tab:ft-retrievalcompare} (Section~7). Fine-tuning produced
+consistent double-digit improvements across every metric. The largest gain was in
+reranked MRR (+0.1549), indicating that fine-tuning improves not only whether the
+correct chunk is retrieved but also how high it ranks among the final candidates.
+Reranked Recall@5 reached 0.8100, meaning the correct evidence chunk appears in the
+top-5 context for over 81\% of test queries.
 
-\begin{table}[h]
-\centering
-\caption{Retrieval Comparison: Pre-trained vs.\ Fine-tuned}
-\label{tab:retrievalcompare}
-\small
-\begin{tabular}{@{}lccc@{}}
-\toprule
-\textbf{Metric} & \textbf{Pre-trained} & \textbf{Fine-tuned} & \textbf{Delta} \\
-\midrule
-Recall@5 (FAISS)     & 0.6460 & 0.7850 & +0.1390 \\
-Recall@10 (FAISS)    & 0.7260 & 0.8420 & +0.1160 \\
-Recall@20 (FAISS)    & 0.8040 & 0.9010 & +0.0970 \\
-MRR (FAISS)          & 0.4992 & 0.6120 & +0.1128 \\
-NDCG@5 (FAISS)       & 0.5224 & 0.6450 & +0.1226 \\
-NDCG@10 (FAISS)      & 0.5488 & 0.6730 & +0.1242 \\
-NDCG@20 (FAISS)      & 0.5686 & 0.6910 & +0.1224 \\
-Recall@5 (reranked)  & 0.6720 & 0.8100 & +0.1380 \\
-MRR (reranked)       & 0.4751 & 0.6300 & +0.1549 \\
-NDCG@5 (reranked)    & 0.5244 & 0.6650 & +0.1406 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\noindent
-These results show that the fine-tuned retriever and reranker are better aligned with Medicare policy search than the pre-trained models. In particular, the 0.1380 gain in reranked Recall@5 means the final top-5 context is more likely to include the correct evidence.
+Table~\ref{tab:ft-rerank-delta} shows that even after bi-encoder fine-tuning, the
+fine-tuned cross-encoder reranker provides an additional lift of +0.0250 in Recall@5,
++0.0180 in MRR, and +0.0200 in NDCG@5. Table~\ref{tab:ft-doctype} further breaks
+down performance by document type, showing that Claims Processing documents achieve
+the highest reranked Recall@5 (0.8251), likely because their larger chunk count provides
+more contrastive training signal.
 
 
 \newpage
