@@ -1196,7 +1196,7 @@ filtering, the reranker training set contained 307,877 pairwise examples.
 \subsubsection{Loss Function and Hyperparameters}
 
 We fine-tuned \texttt{BAAI/bge-reranker-v2-m3} using \textbf{BinaryCrossEntropyLoss}
-for pairwise relevance classification. Each example consisted of a query--chunk pair
+for pairwise relevance classification. Each example consisted of a query-chunk pair
 labeled 1.0 (positive) or 0.0 (negative).
 
 \begin{table}[h]
@@ -1216,20 +1216,20 @@ Weight decay            & 0.01 \\
 Precision               & fp16 \\
 Gradient checkpointing  & Enabled \\
 Max sequence length     & 2,048 tokens \\
-Best-model metric       & \texttt{ndcg@10} \\
+Best-model metric       & \texttt{ndcg@5} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Validation used a \texttt{CrossEncoderRerankingEvaluator} with 2,042 validation samples,
 each containing 1~positive and its corresponding hard negatives. The best checkpoint was
-selected by NDCG@10.
+selected by NDCG@5.
 
 \subsection{Retrieval Improvement After Fine-Tuning}
 
 To quantify the impact of domain-specific fine-tuning, we evaluated both the pre-trained
 and fine-tuned pipelines on the held-out test set of 5,629 queries. FAISS retrieval
-returned the top 100 candidates; the reranker selected the top 5 from the top 20 FAISS
+returned the top 20 candidates; the reranker selected the top 5 from the top 20 FAISS
 results.
 
 \begin{table}[h]
@@ -1256,7 +1256,7 @@ NDCG@5 (reranked)    & 0.5244 & 0.6650 & +0.1406 \\
 \end{tabular}
 \end{table}
 
-Fine-tuning produced consistent double-digit improvements across every metric. The largest
+Fine-tuning produced consistent improvements across every metric. The largest
 gain was in reranked MRR (+0.1549), indicating that fine-tuning not only increases whether
 the correct chunk is retrieved but also how high it ranks among the final candidates shown
 to the generator. Reranked Recall@5 reached 0.8100, meaning the correct evidence chunk
