@@ -2,7 +2,7 @@
 
 > A Retrieval-Augmented Generation system for answering natural language questions about Medicare coverage, grounded in official CMS policy documents.
 
-Built as a capstone project for **GEN AI 285N / MSBA 285** at the McCombs School of Business, UT Austin.
+
 
 ---
 
